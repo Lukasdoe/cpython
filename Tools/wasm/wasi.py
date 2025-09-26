@@ -160,25 +160,43 @@ def make_build_python(context, working_dir):
 
 def find_wasi_sdk():
     """Find the path to wasi-sdk."""
-    if wasi_sdk_path := os.environ.get("WASI_SDK_PATH"):
-        return pathlib.Path(wasi_sdk_path)
-    elif (default_path := pathlib.Path("/opt/wasi-sdk")).exists():
+    if (default_path := pathlib.Path("/opt/wasi-sdk")).exists():
         return default_path
+    return None
 
 
 def wasi_sdk_env(context):
     """Calculate environment variables for building with wasi-sdk."""
     wasi_sdk_path = context.wasi_sdk_path
-    sysroot = wasi_sdk_path / "share" / "wasi-sysroot"
-    env = {"CC": "clang", "CPP": "clang-cpp", "CXX": "clang++",
-           "AR": "llvm-ar", "RANLIB": "ranlib"}
 
-    for env_var, binary_name in list(env.items()):
-        env[env_var] = os.fsdecode(wasi_sdk_path / "bin" / binary_name)
+    # Use custom sysroot if provided, otherwise derive from wasi_sdk_path
+    if hasattr(context, 'wasi_sysroot') and context.wasi_sysroot:
+        sysroot = pathlib.Path(context.wasi_sysroot)
+    else:
+        sysroot = wasi_sdk_path / "sysroot" / "install" / "share" / "wasi-sysroot"
 
-    if wasi_sdk_path != pathlib.Path("/opt/wasi-sdk"):
+    # Use custom compilers if provided, otherwise use defaults
+    cc = getattr(context, 'cc', None) or (wasi_sdk_path / "bin" / "clang")
+    cpp = getattr(context, 'cpp', None) or (wasi_sdk_path / "bin" / "clang-cpp")
+    cxx = getattr(context, 'cxx', None) or (wasi_sdk_path / "bin" / "clang++")
+
+    env = {"CC": str(cc), "CPP": str(cpp), "CXX": str(cxx),
+           "AR": os.fsdecode(wasi_sdk_path / "bin" / "llvm-ar"),
+           "RANLIB": os.fsdecode(wasi_sdk_path / "bin" / "ranlib")}
+
+    # Add sysroot if not using default path or if custom sysroot is provided
+    if wasi_sdk_path != pathlib.Path("/opt/wasi-sdk") or hasattr(context, 'wasi_sysroot'):
         for compiler in ["CC", "CPP", "CXX"]:
             env[compiler] += f" --sysroot={sysroot}"
+
+    for compiler in ["CC", "CPP", "CXX"]:
+        env[compiler] += f" --target=wasm32-wasi"
+        # Add any additional clang arguments
+        if hasattr(context, 'clang_args') and context.clang_args:
+            env[compiler] += f" {' '.join(arg[1:-1] for arg in context.clang_args)}"
+        # env[compiler] += f" -mbranch-hinting"
+        # env[compiler] += f" -mcompilation-hints-call-targets"
+        # env[compiler] += f" -fprofile-use=/pythons/cpython_main_614d79231d1e60d31b9452ea2afbc2a7d2f0034b/progs.profdata"
 
     env["PKG_CONFIG_PATH"] = ""
     env["PKG_CONFIG_LIBDIR"] = os.pathsep.join(
@@ -203,7 +221,7 @@ def configure_wasi_python(context, working_dir):
         raise ValueError("WASI-SDK not found; "
                         "download from "
                         "https://github.com/WebAssembly/wasi-sdk and/or "
-                        "specify via $WASI_SDK_PATH or --wasi-sdk")
+                        "specify via --wasi-sdk")
 
     config_site = os.fsdecode(CHECKOUT / "Tools" / "wasm" / "config.site-wasm32-wasi")
 
@@ -229,11 +247,17 @@ def configure_wasi_python(context, working_dir):
     # Check dynamically for wasmtime in case it was specified manually via
     # `--host-runner`.
     if WASMTIME_HOST_RUNNER_VAR in context.host_runner:
-        if wasmtime := shutil.which("wasmtime"):
-            args[WASMTIME_VAR_NAME] = wasmtime
+        # Use provided wasmtime path if specified, otherwise search PATH
+        if hasattr(context, 'wasmtime_path') and context.wasmtime_path:
+            wasmtime = str(context.wasmtime_path)
+            if not context.wasmtime_path.is_file():
+                raise FileNotFoundError(f"wasmtime not found at specified path: {wasmtime}")
+        elif wasmtime := shutil.which("wasmtime"):
+            pass  # wasmtime found in PATH
         else:
             raise FileNotFoundError("wasmtime not found; download from "
-                                    "https://github.com/bytecodealliance/wasmtime")
+                                    "https://github.com/bytecodealliance/wasmtime or specify with --wasmtime")
+        args[WASMTIME_VAR_NAME] = wasmtime
     host_runner = context.host_runner.format_map(args)
     env_additions = {"CONFIG_SITE": config_site, "HOSTRUNNER": host_runner}
     build_python = os.fsdecode(build_python_path())
@@ -248,6 +272,7 @@ def configure_wasi_python(context, working_dir):
         configure.append("--with-pydebug")
     if context.args:
         configure.extend(context.args)
+
     call(configure,
          env=updated_env(env_additions | wasi_sdk_env(context)),
          quiet=context.quiet)
@@ -336,8 +361,25 @@ def main():
         subcommand.add_argument("--wasi-sdk", type=pathlib.Path,
                                 dest="wasi_sdk_path",
                                 default=find_wasi_sdk(),
-                                help="Path to wasi-sdk; defaults to "
-                                     "$WASI_SDK_PATH or /opt/wasi-sdk")
+                                help="Path to wasi-sdk; defaults to /opt/wasi-sdk")
+        subcommand.add_argument("--wasi-sysroot", type=str,
+                                dest="wasi_sysroot",
+                                help="Path to WASI sysroot (defaults to wasi-sdk/sysroot/install/share/wasi-sysroot)")
+        subcommand.add_argument("--cc", type=str,
+                                dest="cc",
+                                help="Path to C compiler (defaults to wasi-sdk/bin/clang)")
+        subcommand.add_argument("--cpp", type=str,
+                                dest="cpp",
+                                help="Path to C preprocessor (defaults to wasi-sdk/bin/clang-cpp)")
+        subcommand.add_argument("--cxx", type=str,
+                                dest="cxx",
+                                help="Path to C++ compiler (defaults to wasi-sdk/bin/clang++)")
+        subcommand.add_argument("--clang-args", action="append",
+                                dest="clang_args",
+                                help="Additional arguments to pass to clang compilers (can be used multiple times)")
+        subcommand.add_argument("--wasmtime", type=pathlib.Path,
+                                dest="wasmtime_path",
+                                help="Path to wasmtime binary (defaults to searching PATH)")
         subcommand.add_argument("--host-runner", action="store",
                         default=default_host_runner, dest="host_runner",
                         help="Command template for running the WASI host "
