@@ -63,6 +63,32 @@ def updated_env(updates={}):
     return environment
 
 
+def build_env_with_context(context, base_env=None):
+    """Build environment with custom tool paths and PATH modifications from context."""
+    if base_env is None:
+        base_env = {}
+
+    env_additions = base_env.copy()
+
+    # Add custom tool paths to environment if provided
+    if hasattr(context, 'emcc') and context.emcc:
+        env_additions["CC"] = context.emcc
+    if hasattr(context, 'emcxx') and context.emcxx:
+        env_additions["CXX"] = context.emcxx
+    if hasattr(context, 'llvm_ar') and context.llvm_ar:
+        env_additions["AR"] = context.llvm_ar
+    if hasattr(context, 'llvm_ranlib') and context.llvm_ranlib:
+        env_additions["RANLIB"] = context.llvm_ranlib
+
+    # Add extra paths to PATH if provided
+    if hasattr(context, 'extra_paths') and context.extra_paths:
+        current_path = os.environ.get("PATH", "")
+        new_path_components = context.extra_paths + ([current_path] if current_path else [])
+        env_additions["PATH"] = os.pathsep.join(new_path_components)
+
+    return updated_env(env_additions)
+
+
 def subdir(working_dir, *, clean_ok=False):
     """Decorator to change to a working directory."""
 
@@ -173,14 +199,13 @@ def make_emscripten_libffi(context, working_dir):
         ) as response:
             shutil.copyfileobj(response, tmp_file)
         shutil.unpack_archive(tmp_file.name, working_dir)
+
     call(
         [EMSCRIPTEN_DIR / "make_libffi.sh"],
-        env=updated_env({"PREFIX": PREFIX_DIR}),
+        env=build_env_with_context(context, {"PREFIX": PREFIX_DIR}),
         cwd=working_dir / "libffi-3.4.6",
         quiet=context.quiet,
     )
-
-
 @subdir(HOST_DIR, clean_ok=True)
 def configure_emscripten_python(context, working_dir):
     """Configure the emscripten/host build."""
@@ -206,16 +231,30 @@ def configure_emscripten_python(context, working_dir):
 
     host_runner = context.host_runner
     pkg_config_path_dir = (PREFIX_DIR / "lib/pkgconfig/").resolve()
-    env_additions = {
+
+    # Build environment with custom tool paths and PATH
+    base_env = {
         "CONFIG_SITE": config_site,
         "HOSTRUNNER": host_runner,
         "EM_PKG_CONFIG_PATH": str(pkg_config_path_dir),
     }
+
     build_python = os.fsdecode(build_python_path())
+
+    # Base CFLAGS
+    cflags = "-DPY_CALL_TRAMPOLINE -sUSE_BZIP2"
+
+    # Add extra compiler arguments if provided
+    if hasattr(context, 'extra_args') and context.extra_args:
+        cflags += " " + " ".join(arg[1:-1] for arg in context.extra_args)
+
+    # Use custom emconfigure if provided, otherwise default
+    emconfigure_cmd = getattr(context, 'emconfigure', 'emconfigure')
+
     configure = [
-        "emconfigure",
+        emconfigure_cmd,
         os.path.relpath(CHECKOUT / "configure", working_dir),
-        "CFLAGS=-DPY_CALL_TRAMPOLINE -sUSE_BZIP2",
+        f"CFLAGS={cflags}",
         "PKG_CONFIG=pkg-config",
         f"--host={HOST_TRIPLE}",
         f"--build={build_platform()}",
@@ -233,7 +272,7 @@ def configure_emscripten_python(context, working_dir):
         configure.extend(context.args)
     call(
         configure,
-        env=updated_env(env_additions),
+        env=build_env_with_context(context, base_env),
         quiet=context.quiet,
     )
 
@@ -277,16 +316,15 @@ def configure_emscripten_python(context, working_dir):
 @subdir(HOST_DIR)
 def make_emscripten_python(context, working_dir):
     """Run `make` for the emscripten/host build."""
+
     call(
         ["make", "--jobs", str(cpu_count()), "all"],
-        env=updated_env(),
+        env=build_env_with_context(context),
         quiet=context.quiet,
     )
 
     exec_script = working_dir / "python.sh"
     subprocess.check_call([exec_script, "--version"])
-
-
 def build_all(context):
     """Build everything."""
     steps = [
@@ -372,6 +410,54 @@ def main():
             dest="host_runner",
             help="Command template for running the emscripten host"
             f"`{default_host_runner}`)",
+        )
+
+    # Add tool path arguments for build, configure-host, and make-libffi subcommands
+    for subcommand in build, configure_host, make_libffi_cmd:
+        subcommand.add_argument(
+            "--emcc",
+            action="store",
+            dest="emcc",
+            help="Path to emcc compiler",
+        )
+        subcommand.add_argument(
+            "--em++", "--emcxx",
+            action="store",
+            dest="emcxx",
+            help="Path to em++ compiler",
+        )
+        subcommand.add_argument(
+            "--llvm-ar",
+            action="store",
+            dest="llvm_ar",
+            help="Path to llvm-ar archiver",
+        )
+        subcommand.add_argument(
+            "--llvm-ranlib",
+            action="store",
+            dest="llvm_ranlib",
+            help="Path to llvm-ranlib",
+        )
+        subcommand.add_argument(
+            "--path",
+            action="append",
+            dest="extra_paths",
+            help="Add directory to PATH environment variable (can be used multiple times)",
+        )
+
+    # Add extra compiler arguments for build and configure-host subcommands
+    for subcommand in build, configure_host:
+        subcommand.add_argument(
+            "--emconfigure",
+            action="store",
+            dest="emconfigure",
+            help="Path to emconfigure tool",
+        )
+        subcommand.add_argument(
+            "--extra-args",
+            action="append",
+            dest="extra_args",
+            help="Extra compiler arguments to add to CFLAGS (can be used multiple times)",
         )
 
     context = parser.parse_args()
