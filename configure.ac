@@ -7990,7 +7990,7 @@ PY_HACL_CREATE_MODULE([BLAKE2], [_blake2], [test "$with_builtin_blake2" = yes])
 dnl HMAC builtin library does not need OpenSSL for now. In the future
 dnl we might want to rely on OpenSSL EVP/NID interface or implement
 dnl our own for algorithm resolution.
-PY_HACL_CREATE_MODULE([HMAC], [_hmac], [])
+dnl PY_HACL_CREATE_MODULE([HMAC], [_hmac], [])
 ### end(cryptographic primitives)
 
 PY_STDLIB_MOD([_ctypes],
