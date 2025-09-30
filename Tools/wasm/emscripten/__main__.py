@@ -246,7 +246,7 @@ def configure_emscripten_python(context, working_dir):
 
     # Add extra compiler arguments if provided
     if hasattr(context, 'extra_args') and context.extra_args:
-        cflags += " " + " ".join(arg[1:] for arg in context.extra_args)
+        cflags += " " + " ".join(arg[1:-1] for arg in context.extra_args)
 
     # Use custom emconfigure if provided, otherwise default
     emconfigure_cmd = getattr(context, 'emconfigure', 'emconfigure')
