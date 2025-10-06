@@ -96,7 +96,8 @@
 
 # Since HMAC is always supported, the HACL* implementation modules must
 # be built unconditionally.
-@MODULE__HMAC_TRUE@_hmac hmacmodule.c
+# _hmac module disabled due to missing HACL* dependencies
+#@MODULE__HMAC_TRUE@_hmac hmacmodule.c
 
 ############################################################################
 # XML and text
